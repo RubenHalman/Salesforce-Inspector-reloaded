@@ -105,6 +105,8 @@ class FlowScanner {
     this.flowId = flowId;
     this.currentFlow = null;
     this.scanResults = [];
+    // Results as the core returned them, kept for the SARIF export
+    this.rawScanResults = null;
     this.flowScannerCore = null;
     this.isScanning = false;
     this._elementMap = new Map();
@@ -221,13 +223,34 @@ class FlowScanner {
       csvRows.push(row.join(","));
     });
 
-    // Create a Blob and trigger a download.
-    const csvContent = csvRows.join("\n");
-    const blob = new Blob([csvContent], {type: "text/csv"});
+    this._downloadFile(csvRows.join("\n"), "text/csv", "csv");
+  }
+
+  /**
+   * Exports the scan results as SARIF, the static analysis format understood by
+   * code scanning tools such as GitHub code scanning and SonarQube.
+   */
+  handleSarifExportClick() {
+    if (!this.rawScanResults?.length || typeof this.flowScannerCore?.exportSarif !== "function") {
+      return;
+    }
+
+    this._downloadFile(this.flowScannerCore.exportSarif(this.rawScanResults), "application/json", "sarif");
+  }
+
+  /**
+   * Offers the given content to the user as a download named after the scanned flow.
+   * @private
+   * @param {string} content - The file content.
+   * @param {string} mimeType - The MIME type of the content.
+   * @param {string} extension - The file extension to use.
+   */
+  _downloadFile(content, mimeType, extension) {
+    const blob = new Blob([content], {type: mimeType});
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "flow-scan-" + this.currentFlow.name + "-" + new Date().toISOString().split("T")[0] + ".csv";
+    a.download = "flow-scan-" + this.currentFlow.name + "-" + new Date().toISOString().split("T")[0] + "." + extension;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -726,6 +749,7 @@ class FlowScanner {
     }
 
     this.isScanning = true;
+    this.rawScanResults = null;
 
     try {
       // Ensure the core scanner library is available.
@@ -835,6 +859,7 @@ class FlowScanner {
       const scanResults = this.flowScannerCore.scan([parsedFlow], ruleConfig);
 
       // Store final results.
+      this.rawScanResults = scanResults;
       this.scanResults = this.processScanResults(scanResults);
     } catch (error) {
       this.scanResults = [{
@@ -1197,7 +1222,7 @@ function FlowInfoSection(props) {
 }
 
 function ScanSummary(props) {
-  const {totalIssues, errorCount, warningCount, infoCount, onExportResults, onExpandAll, onCollapseAll, isStatItemClickable, onStatItemClick} = props;
+  const {totalIssues, errorCount, warningCount, infoCount, onExportResults, onExportSarif, onExpandAll, onCollapseAll, isStatItemClickable, onStatItemClick} = props;
 
   // Pre-calculate clickable states to avoid repeated function calls
   const errorClickable = isStatItemClickable("error", errorCount);
@@ -1246,10 +1271,17 @@ function ScanSummary(props) {
       h("div", {className: "summary-actions"},
         h("button", {
           className: "slds-button slds-button_brand slds-m-right_small",
-          title: "Export Results",
+          title: "Export Results as CSV",
           onClick: onExportResults,
           disabled: totalIssues === 0
-        }, "Export",
+        }, "Export CSV",
+        ),
+        h("button", {
+          className: "slds-button slds-button_neutral slds-m-right_small",
+          title: "Export Results as SARIF",
+          onClick: onExportSarif,
+          disabled: totalIssues === 0
+        }, "Export SARIF",
         ),
         h("button", {className: "slds-button slds-button_neutral slds-m-right_small", id: "expand-all-btn", onClick: onExpandAll}, "Expand All"),
         h("button", {className: "slds-button slds-button_neutral", id: "collapse-all-btn", onClick: onCollapseAll}, "Collapse All")
@@ -1401,6 +1433,7 @@ class App extends React.Component {
     this.onAgentforcePromptChange = this.onAgentforcePromptChange.bind(this);
     this.onToggleDescription = this.onToggleDescription.bind(this);
     this.onExportResults = this.onExportResults.bind(this);
+    this.onExportSarif = this.onExportSarif.bind(this);
     this.onExpandAll = this.onExpandAll.bind(this);
     this.onCollapseAll = this.onCollapseAll.bind(this);
     this.onSeverityToggle = this.onSeverityToggle.bind(this);
@@ -1660,6 +1693,12 @@ class App extends React.Component {
   onExportResults() {
     if (this.flowScanner) {
       this.flowScanner.handleExportClick();
+    }
+  }
+
+  onExportSarif() {
+    if (this.flowScanner) {
+      this.flowScanner.handleSarifExportClick();
     }
   }
 
@@ -2018,6 +2057,7 @@ class App extends React.Component {
         warningCount,
         infoCount,
         onExportResults: this.onExportResults,
+        onExportSarif: this.onExportSarif,
         onExpandAll: this.onExpandAll,
         onCollapseAll: this.onCollapseAll,
         isStatItemClickable: this.isStatItemClickable.bind(this),

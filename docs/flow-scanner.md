@@ -66,11 +66,10 @@ Exemple of a scan result:
 
 ## Exporting Scan Results
 
-You can export the scan results as a CSV file for documentation or sharing:
+You can export the scan results from the results summary panel, named with your flow's name and the current date:
 
-1. Click the **Export** button in the results summary panel.
-2. The CSV file will be downloaded automatically, named with your flow's name and the current date.
-3. Open the CSV in Excel, Google Sheets, or any spreadsheet tool to review or share the findings.
+- **Export CSV** downloads a spreadsheet of the findings, one row per affected element. Open it in Excel, Google Sheets, or any spreadsheet tool to review or share them.
+- **Export SARIF** downloads the findings as [SARIF 2.1.0](https://sarifweb.azurewebsites.net/), the static analysis format read by code scanning tools such as GitHub code scanning and SonarQube.
 
 ---
 
@@ -179,7 +178,7 @@ graph TD
 
     EXT --> |5. Flow XML Data| CORE[📚 Lightning Flow Scanner embedded lib<br/>• XML Parser<br/>• Rule Engine 20+ rules<br/>• Flow Analysis]
 
-    CORE --> |6. Analysis Results| RES[📊 Scan Results<br/>• Error/Warning/Info<br/>• Rule Violations<br/>• CSV Export]
+    CORE --> |6. Analysis Results| RES[📊 Scan Results<br/>• Error/Warning/Info<br/>• Rule Violations<br/>• CSV & SARIF Export]
 
     RES --> |7. Formatted Results<br/>& Export Options| EXT
     EXT --> |8. Display Results| U
@@ -220,7 +219,7 @@ graph TD
    - Results categorized by severity: Error, Warning, Info
 4. **Result Presentation**
    - Results aggregated and displayed in interactive UI
-   - Export functionality generates CSV reports
+   - Export functionality generates CSV and SARIF reports
    - Users can expand/collapse rule categories
 
 ### API Integration Details

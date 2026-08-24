@@ -2,6 +2,7 @@
 
 ## Version 2.1
 
+- `Flow Scanner` Export the scan results as SARIF, next to the existing CSV export
 - `Flow Scanner` Upgrade Lightning Flow Scanner Core to v6.19.3, restore the beta rules and the disabled rules handling, and read the configurable thresholds from the rule definitions
 - `Metadata` Add 'Run Relevant Tests' option to metadata deploy Test Level picklist [feature 1286](https://github.com/tprouvot/Salesforce-Inspector-reloaded/issues/1286)
 - `Popup` Fix language flag icons for Catalan and Basque on the Users tab [issue #1196](https://github.com/tprouvot/Salesforce-Inspector-reloaded/issues/1196)

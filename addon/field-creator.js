@@ -1,5 +1,7 @@
 /* global React ReactDOM field-creator.js */
 import {sfConn, apiVersion} from "./inspector.js";
+import {PageHeader} from "./components/PageHeader.js";
+import {UserInfoModel, createSpinForMethod, getSobjectsList, Constants, applyProductionStyling} from "./utils.js";
 
 let h = React.createElement;
 
@@ -535,7 +537,7 @@ class FieldOptionModal extends React.Component {
               name: "length",
               className: "form-control input-textBox",
               placeholder: "Max is 255 characters.",
-              value: field.length || 255,
+              value: field.length ?? 255,
               onChange: this.handleInputChange
             })
           ),
@@ -936,6 +938,10 @@ class App extends React.Component {
 
   constructor(props) {
     super(props);
+    const {sfHost} = props;
+    this.sfHost = sfHost;
+    this.sfLink = "https://" + sfHost;
+    this.spinnerCount = 0;
     this.state = {
       objects: [], // Store all objects fetched from API
       profiles: [],
@@ -951,15 +957,24 @@ class App extends React.Component {
       objectSearch: "",
       fieldErrorMessage: "",
       errorMessageClickable: false,
-      userInfo: "...",
       filteredObjects: [],
       includeManagedPackage: localStorage.getItem("fieldCreatorIncludeManaged") === "true"
     };
-    let trialExpDate = localStorage.getItem(sfHost + "_trialExpirationDate");
-    if (localStorage.getItem(sfHost + "_isSandbox") != "true" && (!trialExpDate || trialExpDate === "null")) {
-      //change background color for production
-      document.body.classList.add("prod");
-    }
+
+    // Initialize spinFor method
+    this.spinFor = createSpinForMethod(this);
+
+    // Initialize user info model - handles all user-related properties
+    this.userInfoModel = new UserInfoModel(this.spinFor.bind(this));
+
+    // Set orgName from sfHost
+    this.orgName = sfHost.split(".")[0]?.toUpperCase() || "";
+
+    applyProductionStyling(sfHost);
+  }
+
+  didUpdate() {
+    this.forceUpdate();
   }
 
   // Utility method to check if an object is a platform event
@@ -982,7 +997,19 @@ class App extends React.Component {
   componentDidMount() {
     this.fetchObjects();
     this.fetchPermissionSets();
-    this.fetchUserInfo();
+    this.onSobjectsListRefreshed = (e) => {
+      if (e.detail?.sfHost === this.sfHost) {
+        const layoutableObjects = e.detail.sobjectsList.filter(obj =>
+          obj.layoutable === true || (obj.keyPrefix && obj.keyPrefix.startsWith("e"))
+        );
+        this.setState({objects: layoutableObjects});
+      }
+    };
+    window.addEventListener(Constants.SOBJECTS_LIST_REFRESHED_EVENT, this.onSobjectsListRefreshed);
+  }
+
+  componentWillUnmount() {
+    window.removeEventListener(Constants.SOBJECTS_LIST_REFRESHED_EVENT, this.onSobjectsListRefreshed);
   }
 
   handleObjectSearch = (e) => {
@@ -1067,17 +1094,6 @@ class App extends React.Component {
   };
 
 
-  fetchUserInfo() {
-    const wsdl = sfConn.wsdl(apiVersion, "Partner");
-    sfConn.soap(wsdl, "getUserInfo", {})
-      .then(res => {
-        const userInfo = `${res.userFullName} / ${res.userName} / ${res.organizationName}`;
-        this.setState({userInfo});
-      })
-      .catch(err => {
-        console.error("Error fetching user info:", err);
-      });
-  }
 
   setFieldPermissions(field, fieldId, objectName) {
     if (!field.profiles || !Array.isArray(field.profiles)) {
@@ -1136,10 +1152,13 @@ class App extends React.Component {
 
       case "Currency":
       case "Number":
-      case "Percent":
-        newField.Metadata.precision = parseInt(field.precision) || 18;
-        newField.Metadata.scale = parseInt(field.decimal) || 0;
+      case "Percent": {
+        const scale = parseInt(field.decimal) || 0;
+        const length = parseInt(field.precision) || 18;
+        newField.Metadata.precision = length + scale;
+        newField.Metadata.scale = scale;
         break;
+      }
 
       case "Date":
       case "DateTime":
@@ -1225,98 +1244,13 @@ class App extends React.Component {
     return typeMap[uiType] || uiType;
   }
 
-  //TODO cache entity from popup.js
   fetchObjects = async () => {
     try {
-      const entityMap = new Map();
-      const addEntity = (entity, api) => {
-        let existingEntity = entityMap.get(entity.name);
-        if (existingEntity) {
-          // Update existing entity
-          Object.assign(existingEntity, entity);
-          if (!existingEntity.availableApis.includes(api)) {
-            existingEntity.availableApis.push(api);
-          }
-          // Keep layoutable true if it was true in either call
-          existingEntity.layoutable = existingEntity.layoutable || entity.layoutable;
-        } else {
-          // Add new entity
-          entityMap.set(entity.name, {
-            ...entity,
-            availableApis: [api],
-            availableKeyPrefix: entity.keyPrefix || null,
-            layoutable: entity.layoutable || false // Default to false if not specified
-          });
-        }
-      };
+      // Get sobjects list (from cache or fetched from API)
+      const sobjectsList = await getSobjectsList(this.sfHost);
 
-      const getObjects = async (url, api) => {
-        try {
-          const describe = await sfConn.rest(url);
-          describe.sobjects.forEach(sobject => {
-            addEntity({...sobject, layoutable: sobject.layoutable || false}, api);
-          });
-        } catch (err) {
-          console.error("list " + api + " sobjects", err);
-        }
-      };
-
-      //TODO cache entityDefinitionCount from popup.js
-      const getEntityDefinitionCount = async () => {
-        try {
-          const res = await sfConn.rest("/services/data/v" + apiVersion + "/tooling/query?q=" + encodeURIComponent("SELECT COUNT() FROM EntityDefinition"));
-          return res.totalSize;
-        } catch (err) {
-          console.error("count entity definitions: ", err);
-          return 0;
-        }
-      };
-
-      const getEntityDefinitions = async () => {
-        const entityDefinitionCount = await getEntityDefinitionCount();
-        const batchSize = 2000;
-        const batches = Math.ceil(entityDefinitionCount / batchSize);
-        const batchPromises = [];
-
-        for (let bucket = 0; bucket < batches; bucket++) {
-          let offset = bucket > 0 ? " OFFSET " + (bucket * batchSize) : "";
-          let query = `SELECT QualifiedApiName, Label, KeyPrefix, DurableId, IsCustomSetting, RecordTypesSupported, NewUrl, IsEverCreatable, NamespacePrefix FROM EntityDefinition ORDER BY QualifiedApiName ASC LIMIT ${batchSize}${offset}`;
-
-          let batchPromise = sfConn.rest("/services/data/v" + apiVersion + "/tooling/query?q=" + encodeURIComponent(query))
-            .then(respEntity => {
-              for (let record of respEntity.records) {
-                addEntity({
-                  name: record.QualifiedApiName,
-                  label: record.Label,
-                  keyPrefix: record.KeyPrefix,
-                  durableId: record.DurableId,
-                  isCustomSetting: record.IsCustomSetting,
-                  recordTypesSupported: record.RecordTypesSupported,
-                  newUrl: record.NewUrl,
-                  isEverCreatable: record.IsEverCreatable,
-                  namespacePrefix: record.NamespacePrefix,
-                  // Don't set layoutable here, as it should come from describe calls
-                }, "EntityDef");
-              }
-            }).catch(err => {
-              console.error("list entity definitions: ", err);
-            });
-
-          batchPromises.push(batchPromise);
-        }
-
-        return Promise.all(batchPromises);
-      };
-
-      // Fetch objects from different APIs
-      await Promise.all([
-        getObjects("/services/data/v" + apiVersion + "/sobjects/", "regularApi"),
-        getObjects("/services/data/v" + apiVersion + "/tooling/sobjects/", "toolingApi"),
-        getEntityDefinitions(),
-      ]);
-
-      const sObjectsList = Array.from(entityMap.values());
-      const layoutableObjects = sObjectsList.filter(obj =>
+      // Filter for layoutable objects (objects that can have layouts or platform events)
+      const layoutableObjects = sobjectsList.filter(obj =>
         obj.layoutable === true || (obj.keyPrefix && obj.keyPrefix.startsWith("e")) //add layoutable objects and PE objects
       );
 
@@ -1638,30 +1572,45 @@ class App extends React.Component {
   };
 
   render() {
-    const {fields, showModal, showProfilesModal, currentFieldIndex, userInfo, selectedObject} = this.state;
+    const {fields, showModal, showProfilesModal, currentFieldIndex, selectedObject} = this.state;
 
     return (
       h("div", {onClick: () => this.setState({
         filteredObjects: []
       })},
-      h("div", {id: "user-info"},
-        h("a", {href: `https://${sfConn.instanceHostname}`, className: "sf-link"},
-          h("svg", {viewBox: "0 0 24 24"},
-            h("path", {d: "M18.9 12.3h-1.5v6.6c0 .2-.1.3-.3.3h-3c-.2 0-.3-.1-.3-.3v-5.1h-3.6v5.1c0 .2-.1.3-.3.3h-3c-.2 0-.3-.1-.3-.3v-6.6H5.1c-.1 0-.3-.1-.3-.2s0-.2.1-.3l6.9-7c.1-.1.3-.1.4 0l7 7v.3c0 .1-.2.2-.3.2z"})
-          ),
-          " Salesforce Home"
-        ),
-        h("h1", {}, "Field Creator"),
-        h("span", {}, " / " + userInfo),
-        h("div", {className: "flex-right"},
-          h("span", {className: "slds-assistive-text"}),
-          h("div", {className: "slds-spinner__dot-a"}),
-          h("div", {className: "slds-spinner__dot-b"}),
-        ),
-        h("a", {href: "https://tprouvot.github.io/Salesforce-Inspector-reloaded/field-creator/", target: "_blank", id: "help-btn", title: "Field Creator Help", onClick: null},
-          h("div", {className: "icon"})
-        ),
-      ),
+      h(PageHeader, {
+        pageTitle: "Field Creator",
+        orgName: this.orgName,
+        sfLink: this.sfLink,
+        sfHost: this.sfHost,
+        spinnerCount: this.spinnerCount,
+        ...this.userInfoModel.getProps(),
+        utilityItems: [
+          h("div", {
+            key: "help-btn",
+            className: "slds-builder-header__utilities-item slds-p-top_x-small slds-p-horizontal_x-small sfir-border-none"
+          },
+          h("a", {
+            href: "https://tprouvot.github.io/Salesforce-Inspector-reloaded/field-creator/",
+            target: "_blank",
+            title: "Field Creator Help",
+            className: "slds-button slds-button_icon slds-button_icon-border-filled"
+          },
+          h("svg", {className: "slds-button__icon", "aria-hidden": "true"},
+            h("use", {xlinkHref: "symbols.svg#question"})
+          )
+          )
+          )
+        ]
+      }),
+      h("div", {
+        className: "slds-m-top_xx-large",
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          height: "calc(100vh - 4rem)"
+        }
+      },
       h("div", {className: "relativePosition"},
         h("div", {className: "area firstHeader relativePosition zIndex1"},
           h("div", {className: "form-group"},
@@ -1812,6 +1761,7 @@ class App extends React.Component {
           )
         )
       ))
+      )
     );
   }
 }

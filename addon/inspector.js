@@ -1,10 +1,17 @@
-import {getRedirectUri, getClientId, Constants} from "./utils.js";
+import {getRedirectUri, getClientId, isSettingEnabled, Constants} from "./utils.js";
+import {apiStatistics} from "./api-statistics.js";
 
-export let defaultApiVersion = "65.0";
+export let defaultApiVersion = "66.0";
 export let apiVersion = localStorage.getItem("apiVersion") == null ? defaultApiVersion : localStorage.getItem("apiVersion");
 
 export let sessionError;
 const clientId = "Salesforce Inspector Reloaded";
+const qaInternalClientIdPrefix = "SfdcInternalQA/";
+
+// Resolved on each call so toggling the option applies without reloading open pages
+function getCallOptionsClientId() {
+  return isSettingEnabled(Constants.QA_INTERNAL_MODE) ? qaInternalClientIdPrefix + clientId : clientId;
+}
 
 export let sfConn = {
 
@@ -40,6 +47,9 @@ export let sfConn = {
         const accessToken = await this.exchangeCodeForToken(sfHost, authorizationCode, codeVerifier);
         this.sessionId = accessToken;
         localStorage.setItem(sfHost + Constants.ACCESS_TOKEN, accessToken);
+
+        //send message to popup so that it can update the token
+        chrome.runtime.sendMessage({message: "tokenUpdated", sfHost});
 
         // Clean up code verifier
         localStorage.removeItem(sfHost + Constants.CODE_VERIFIER);
@@ -112,6 +122,9 @@ export let sfConn = {
       throw new Error("Instance Hostname not found");
     }
 
+    // Track API call start time for statistics
+    const startTime = performance.now();
+
     let xhr = new XMLHttpRequest();
     if (useCache) {
       url += (url.includes("?") ? "&" : "?") + "cache=" + Math.random();
@@ -119,8 +132,6 @@ export let sfConn = {
     const sfHost = "https://" + this.instanceHostname;
     const fullUrl = new URL(url, sfHost);
     xhr.open(method, fullUrl.toString(), true);
-    xhr.setRequestHeader("Accept", "application/json; charset=UTF-8");
-    xhr.setRequestHeader("Sforce-Call-Options", `client=${clientId}`);
 
     if (api == "bulk") {
       xhr.setRequestHeader("X-SFDC-Session", this.sessionId);
@@ -130,8 +141,20 @@ export let sfConn = {
       throw new Error("Unknown api");
     }
 
-    if (body !== undefined) {
+    // Apply custom headers first (but filter out protected headers)
+    const protectedHeaders = ["Sforce-Call-Options"];
+    for (let [name, value] of Object.entries(headers)) {
+      if (!protectedHeaders.includes(name)) {
+        xhr.setRequestHeader(name, value);
+      }
+    }
+
+    // Set default Content-Type header if body is present and Content-Type not provided by custom headers
+    if (body !== undefined && !headers.hasOwnProperty("Content-Type")) {
       xhr.setRequestHeader("Content-Type", "application/json; charset=UTF-8");
+    }
+
+    if (body !== undefined) {
       if (bodyType == "json") {
         body = JSON.stringify(body);
       } else if (bodyType == "raw") {
@@ -141,9 +164,13 @@ export let sfConn = {
       }
     }
 
-    for (let [name, value] of Object.entries(headers)) {
-      xhr.setRequestHeader(name, value);
+    // Set default Accept header if not provided by custom headers
+    if (!headers.hasOwnProperty("Accept")) {
+      xhr.setRequestHeader("Accept", "application/json; charset=UTF-8");
     }
+
+    // Always set this header last to ensure it cannot be overridden
+    xhr.setRequestHeader("Sforce-Call-Options", `client=${getCallOptionsClientId()}`);
 
     xhr.responseType = responseType;
     await new Promise((resolve, reject) => {
@@ -163,31 +190,44 @@ export let sfConn = {
       };
       xhr.send(body);
     });
+
+    // Calculate duration and track statistics
+    const duration = performance.now() - startTime;
+    let errorMessage = null;
+
     if (rawResponse){
+      apiStatistics.trackApiCall("rest", url, method, duration, false);
       return xhr;
-    } else if (xhr.status >= 200 && xhr.status < 300) {
+    } else if (xhr.status >= 200 && xhr.status < 400) {
+      apiStatistics.trackApiCall("rest", url, method, duration, false);
       return xhr.response;
     } else if (xhr.status == 0) {
       if (!logErrors) { console.error("Received no response from Salesforce REST API", xhr); }
+      errorMessage = "Network error, offline or timeout";
+      apiStatistics.trackApiCall("rest", url, method, duration, true, errorMessage);
       let err = new Error();
       err.name = "SalesforceRestError";
-      err.message = "Network error, offline or timeout";
+      err.message = errorMessage;
       throw err;
     } else if (xhr.status == 401) {
       let error = xhr.response.length > 0 ? xhr.response[0].message : "New access token needed";
+      errorMessage = `401 Unauthorized: ${error}`;
       //set sessionError only if user has already generated a token, which will prevent to display the error when the session is expired and api access control not configured
       if (localStorage.getItem(this.instanceHostname + Constants.ACCESS_TOKEN)){
         sessionError = {text: "Access Token Expired", title: "Generate New Token", type: "warning", icon: "warning"};
         showToastBanner();
       }
+      apiStatistics.trackApiCall("rest", url, method, duration, true, errorMessage);
       let err = new Error();
       err.name = "Unauthorized";
       err.message = error;
       throw err;
     } else if (xhr.status == 403) {
       let error = xhr.response.length > 0 ? xhr.response[0].message : "Error";
+      errorMessage = `403 Forbidden: ${error}`;
       sessionError = {text: error, type: "error", icon: "error"};
       showToastBanner();
+      apiStatistics.trackApiCall("rest", url, method, duration, true, errorMessage);
       let err = new Error();
       err.name = "Forbidden";
       err.message = error;
@@ -198,13 +238,17 @@ export let sfConn = {
       err.name = "SalesforceRestError";
       err.detail = xhr.response;
       try {
-        err.message = err.detail.map(err => `${err.errorCode}: ${err.message}${err.fields && err.fields.length > 0 ? ` [${err.fields.join(", ")}]` : ""}`).join("\n");
+        errorMessage = err.detail.map(err => `${err.errorCode}: ${err.message}${err.fields && err.fields.length > 0 ? ` [${err.fields.join(", ")}]` : ""}`).join("\n");
+        err.message = errorMessage;
       } catch (ex) {
-        err.message = JSON.stringify(xhr.response);
+        errorMessage = JSON.stringify(xhr.response);
+        err.message = errorMessage;
       }
       if (!err.message) {
-        err.message = "HTTP error " + xhr.status + " " + xhr.statusText;
+        errorMessage = `HTTP error ${xhr.status} ${xhr.statusText}`;
+        err.message = errorMessage;
       }
+      apiStatistics.trackApiCall("rest", url, method, duration, true, errorMessage);
       throw err;
     }
   },
@@ -248,11 +292,14 @@ export let sfConn = {
       throw new Error("Session not found");
     }
 
+    // Track API call start time for statistics
+    const startTime = performance.now();
+
     let xhr = new XMLHttpRequest();
     xhr.open("POST", "https://" + this.instanceHostname + wsdl.servicePortAddress + "?cache=" + Math.random(), true);
     xhr.setRequestHeader("Content-Type", "text/xml");
     xhr.setRequestHeader("SOAPAction", '""');
-    xhr.setRequestHeader("CallOptions", `client:${clientId}`);
+    xhr.setRequestHeader("CallOptions", `client:${getCallOptionsClientId()}`);
 
     let sessionHeaderKey = wsdl.apiName == "Metadata" ? "met:SessionHeader" : "SessionHeader";
     let sessionIdKey = wsdl.apiName == "Metadata" ? "met:sessionId" : "sessionId";
@@ -284,7 +331,13 @@ export let sfConn = {
       };
       xhr.send(requestBody);
     });
+
+    // Calculate duration and track statistics
+    const duration = performance.now() - startTime;
+    let errorMessage = null;
+
     if (xhr.status == 200) {
+      apiStatistics.trackApiCall("soap", null, method, duration, false);
       let responseBody = xhr.response.querySelector(method + "Response");
       let parsed = XML.parse(responseBody).result;
       return parsed;
@@ -294,10 +347,13 @@ export let sfConn = {
       err.name = "SalesforceSoapError";
       err.detail = xhr.response;
       try {
-        err.message = xhr.response.querySelector("faultstring").textContent;
+        errorMessage = xhr.response.querySelector("faultstring").textContent;
+        err.message = errorMessage;
       } catch (ex) {
-        err.message = "HTTP error " + xhr.status + " " + xhr.statusText;
+        errorMessage = `HTTP error ${xhr.status} ${xhr.statusText}`;
+        err.message = errorMessage;
       }
+      apiStatistics.trackApiCall("soap", null, method, duration, true, errorMessage);
       throw err;
     }
   },
@@ -310,7 +366,7 @@ export let sfConn = {
 
 };
 
-class XML {
+export class XML {
   static stringify({name, attributes, value}) {
     function buildRequest(el, params) {
       if (params == null) {
@@ -395,6 +451,7 @@ function getMyDomain(host) {
   if (host) {
     const myDomain = host
       .replace(/\.lightning\.force\./, ".my.salesforce.") //avoid HTTP redirect (that would cause Authorization header to be dropped)
+      .replace(/\.lightning\.([^.]+)\.force\.com$/, ".my.$1.salesforce.com") // handle hosts like *.lightning.xx-xxx.force.com
       .replace(/\.mcas\.ms$/, ""); //remove trailing .mcas.ms if the client uses Microsoft Defender for Cloud Apps
     return myDomain;
   }

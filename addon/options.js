@@ -1,29 +1,31 @@
 /* global React ReactDOM */
 import {sfConn, apiVersion, defaultApiVersion} from "./inspector.js";
-import {nullToEmptyString, getLatestApiVersionFromOrg, Constants} from "./utils.js";
-import {getFlowScannerRules} from "./flow-scanner.js";
-/* global initButton, lightningflowscanner, Picker */
+import {nullToEmptyString, getLatestApiVersionFromOrg, Constants, UserInfoModel, createSpinForMethod, DataCache, applyProductionStyling} from "./utils.js";
+import {getFlowScannerRules, FLOW_SCANNER_RULES_STORAGE_KEY} from "./flow-scanner-rules.js";
+/* global initButton, lightningflowscanner */
 import {DescribeInfo} from "./data-load.js";
 import Toast from "./components/Toast.js";
 import Tooltip from "./components/Tooltip.js";
 import ColorPicker from "./components/ColorPicker.js";
+import {PageHeader} from "./components/PageHeader.js";
 
 class Model {
 
   constructor(sfHost) {
     this.sfHost = sfHost;
     this.sfLink = "https://" + this.sfHost;
-    this.userInfo = "...";
-    let trialExpDate = localStorage.getItem(sfHost + "_trialExpirationDate");
-    if (localStorage.getItem(sfHost + "_isSandbox") != "true" && (!trialExpDate || trialExpDate === "null")) {
-      //change background color for production
-      document.body.classList.add("prod");
-    }
+    this.orgName = this.sfHost.split(".")[0]?.toUpperCase() || "";
+    this.spinnerCount = 0;
+
+    applyProductionStyling(sfHost);
+
+    // Initialize spinFor method
+    this.spinFor = createSpinForMethod(this);
 
     this.describeInfo = new DescribeInfo(this.spinFor.bind(this), () => { });
-    this.spinFor(sfConn.soap(sfConn.wsdl(apiVersion, "Partner"), "getUserInfo", {}).then(res => {
-      this.userInfo = res.userFullName + " / " + res.userName + " / " + res.organizationName;
-    }));
+
+    // Initialize user info model - handles all user-related properties
+    this.userInfoModel = new UserInfoModel(this.spinFor.bind(this));
   }
 
   /**
@@ -43,24 +45,6 @@ class Model {
     }
   }
 
-  /**
-   * Show the spinner while waiting for a promise.
-   * didUpdate() must be called after calling spinFor.
-   * didUpdate() is called when the promise is resolved or rejected, so the caller doesn't have to call it, when it updates the model just before resolving the promise, for better performance.
-   * @param promise The promise to wait for.
-   */
-  spinFor(promise) {
-    this.spinnerCount++;
-    promise
-      .catch(err => {
-        console.error("spinFor", err);
-      })
-      .then(() => {
-        this.spinnerCount--;
-        this.didUpdate();
-      })
-      .catch(err => console.log("error handling failed", err));
-  }
 
 }
 
@@ -88,7 +72,6 @@ class OptionsTabSelector extends React.Component {
         tabTitle: "User Experience",
         content: [
           {option: ArrowButtonOption, props: {key: 1}},
-          {option: Option, props: {type: "toggle", title: "Flow Scrollability", key: "scrollOnFlowBuilder"}},
           {option: Option, props: {type: "toggle", title: "Inspect page - Show table borders", key: "displayInspectTableBorders"}},
           {option: Option, props: {type: "toggle", title: "Always open links in a new tab", key: "openLinksInNewTab", tooltip: "Enabling this option will prevent Lightning Navigation (faster loading) to be used"}},
           {option: Option, props: {type: "toggle", title: "Open Permission Set / Permission Set Group summary from shortcuts", key: "enablePermSetSummary"}},
@@ -99,7 +82,6 @@ class OptionsTabSelector extends React.Component {
                 {label: "Flows", name: "flows", checked: true},
                 {label: "Profiles", name: "profiles", checked: true},
                 {label: "PermissionSets", name: "permissionSets", checked: true},
-                {label: "Communities", name: "networks", checked: true},
                 {label: "Apex Classes", name: "classes", checked: false}
               ]}
           },
@@ -107,26 +89,26 @@ class OptionsTabSelector extends React.Component {
           {option: MultiCheckboxButtonGroup,
             props: {title: "Show buttons",
               key: "hideButtonsOption",
+              length: 8,
               checkboxes: [
                 {label: "New", name: "new", checked: true},
                 {label: "Explore API", name: "explore-api", checked: true},
                 {label: "Org Limits", name: "org-limits", checked: true},
                 {label: "Options", name: "options", checked: true},
-                {label: "Generate Access Token", name: "generate-token", checked: true}
+                {label: "Generate Access Token", name: "generate-token", checked: true},
+                {label: "Copy User Id", name: "copy-userId", checked: true},
+                {label: "Reset Password", name: "reset-password", checked: true}
               ]}
           },
           {option: FaviconOption, props: {key: this.sfHost + FaviconOption.CUSTOM_FAVICON_KEY, tooltip: "You may need to add this domain to CSP trusted domains to see the favicon in Salesforce."}},
           {option: Option, props: {type: "toggle", title: "Use favicon color on sandbox banner", key: "colorizeSandboxBanner"}},
           {option: Option, props: {type: "toggle", title: "Highlight PROD (color from favicon)", key: "colorizeProdBanner", tooltip: "Top border in extension pages and banner on Salesforce"}},
-          {option: Option, props: {type: "text", title: "Banner text", key: this.sfHost + "_prodBannerText", tooltip: "Text that will be displayed in the banner (if enabled)", placeholder: "WARNING: THIS IS PRODUCTION"}},
+          {option: Option, props: {type: "text", title: "Banner text", inputSize: "6", key: this.sfHost + "_prodBannerText", tooltip: "Text that will be displayed in the banner (if enabled)", placeholder: "WARNING: THIS IS PRODUCTION"}},
           {option: Option, props: {type: "toggle", title: "Enable Lightning Navigation", key: "lightningNavigation", default: true, tooltip: "Enable faster navigation by using standard e.force:navigateToURL method"}},
           {option: MultiCheckboxButtonGroup,
-            props: {title: "Exclude users from search",
-              key: "userSearchExclusions",
-              checkboxes: [
-                {label: " Exclude Portal users", name: "portal", checked: false},
-                {label: " Exclude Inactive users", name: "inactive", checked: false}
-              ]}
+            props: {title: "Exclude users from search (org specific)",
+              key: this.sfHost + Constants.USER_SEARCH_EXCLUSIONS_KEY,
+              checkboxes: Constants.USER_SEARCH_EXCLUSIONS_CHECKBOXES.map(({label, name}) => ({label, name, checked: false}))}
           },
           {option: MultiCheckboxButtonGroup,
             props: {title: "User Default Search Fields",
@@ -150,6 +132,8 @@ class OptionsTabSelector extends React.Component {
                 {label: "Org", name: "org"}
               ]}
           },
+          {option: Option, props: {type: "toggle", title: "Enable Dynamic Popup Height", key: "popupHeighDynamictMode", default: false, tooltip: "When enabled, the popup height will be dynamically adjusted based on the content."}},
+          {option: Option, props: {type: "toggle", title: "Show recently viewed records in popup", key: Constants.ENABLE_RECENTLY_VIEWED_RECORDS, default: true, tooltip: "When enabled, queries and displays recently viewed records when focusing the Object search field in the popup."}},
         ]
       },
       {
@@ -172,7 +156,69 @@ class OptionsTabSelector extends React.Component {
                   e.target.disabled = true;
                 }
               }}},
-          {option: Option, props: {type: "text", title: "Rest Header", placeholder: "Rest Header", key: "createUpdateRestCalloutHeaders"}}
+          {option: Option, props: {type: "text", title: "Rest Header", placeholder: "Rest Header", key: "createUpdateRestCalloutHeaders", inputSize: "6"}},
+          {option: Option, props: {type: "toggle", title: "Enable API Stats Debug Mode", key: Constants.API_DEBUG_STATISTICS_MODE, default: false, tooltip: "When enabled, tracks API call statistics (REST and SOAP) to help monitor API usage. Statistics can be viewed on the API Debug Statistics page."}},
+          {option: Option, props: {type: "toggle", title: "Preload SObjects before popup opens", key: Constants.PRELOAD_SOBJECTS_BEFORE_POPUP, default: true, tooltip: "When enabled, loads the SObjects list from cache before the popup is opened for faster context detection. Disable to reduce initial load time and only load when the Objects tab is accessed."}},
+          {option: Option, props: {type: "toggle", title: "QA Internal", key: Constants.QA_INTERNAL_MODE, default: false, tooltip: "When enabled, prefixes the API client id sent with internal QA."}},
+        ]
+      },
+      {
+        id: "cache",
+        tabTitle: "Cache",
+        content: [
+          {option: Option,
+            props: {
+              type: "button",
+              title: "Clear All Extension Cache",
+              key: "clearAllCache",
+              tooltip: "Clear all cache entries from both localStorage and browser.storage.local. This will remove all cached data including User Field Names, SObjects List, and any other cached information.",
+              actionButtonVariant: "destructive",
+              actionButton: {
+                label: "Clear All Cache",
+                title: "Clear all extension cache",
+                onClick: async (e, model, appRef) => {
+                  await DataCache.clearAllExtensionCache();
+                  if (appRef) {
+                    appRef.setState({
+                      showToast: true,
+                      toastMessage: "All extension cache cleared successfully.",
+                      toastVariant: "success",
+                      toastTitle: "Success"
+                    });
+                    setTimeout(() => appRef.hideToast(), 3000);
+                  }
+                }
+              }
+            }
+          },
+          {option: Option,
+            props: {
+              type: "number",
+              title: "User Field Names Cache Duration (hours)",
+              key: "cacheDuration_userFieldNames",
+              default: 168,
+              min: 1,
+              inputSize: "3",
+              tooltip: "Duration in hours for caching User field names. This cache stores User object field metadata to improve performance.",
+              actionButton: {
+                label: "Clear Cache",
+                title: "Clear User Field Names cache",
+                onClick: async (e, model, appRef) => {
+                  await DataCache.clearCache("userFieldNames", model.sfHost, false, false);
+                  if (appRef) {
+                    appRef.setState({
+                      showToast: true,
+                      toastMessage: "User Field Names cache cleared successfully.",
+                      toastVariant: "success",
+                      toastTitle: "Success"
+                    });
+                    setTimeout(() => appRef.hideToast(), 3000);
+                  }
+                }
+              }
+            }
+          },
+          {option: SObjectsCacheOptions, props: {key: "sobjectsCacheOptions"}}
         ]
       },
       {
@@ -182,7 +228,8 @@ class OptionsTabSelector extends React.Component {
           {option: CSVSeparatorOption, props: {key: 1}},
           {option: Option, props: {type: "toggle", title: "Display Query Execution Time", key: "displayQueryPerformance", default: true}},
           {option: Option, props: {type: "toggle", title: "Show Local Time", key: "showLocalTime", default: false}},
-          {option: Option, props: {type: "toggle", title: "Use SObject context on Data Export ", key: "useSObjectContextOnDataImportLink", default: true}},
+          {option: Option, props: {type: "toggle", title: "Use SObject context on Data Export ", key: "useSObjectContextOnDataImpoltrink", default: true}},
+          {option: Option, props: {type: "toggle", title: "Enable List View Export", key: "enableListViewExport", default: false, tooltip: "If enabled, Data Export link will be automatically populated with current ListView"}},
           {option: MultiCheckboxButtonGroup,
             props: {title: "Show buttons",
               key: "hideExportButtonsOption",
@@ -192,22 +239,25 @@ class OptionsTabSelector extends React.Component {
                 {label: "Agentforce", name: "export-agentforce", checked: false}
               ]}
           },
-          {option: Option, props: {type: "toggle", title: "Hide additional Object columns by default on Data Export", key: "hideObjectNameColumnsDataExport", default: false}},
+          {option: Option, props: {type: "toggle", title: "Hide Object columns by default on Data Export", key: "hideObjectNameColumnsDataExport", default: false}},
+          {option: Option, props: {type: "toggle", title: "Prevent line wrap in Data Export table cells", key: "preventLineWrapDataExport", default: true, tooltip: "When enabled, prevents text from wrapping in table cells (matches v1.27 behavior)"}},
           {option: Option, props: {type: "toggle", title: "Include formula fields from suggestion", key: "includeFormulaFieldsFromExportAutocomplete", default: true}},
           {option: Option, props: {type: "toggle", title: "Disable query input autofocus", key: "disableQueryInputAutoFocus"}},
-          {option: Option, props: {type: "number", title: "Number of queries stored in the history", key: "numberOfQueriesInHistory", default: 100}},
-          {option: Option, props: {type: "number", title: "Number of saved queries", key: "numberOfQueriesSaved", default: 50}},
-          {option: Option, props: {type: "textarea", title: "Query Templates", key: "queryTemplates", placeholder: "SELECT Id FROM// SELECT Id FROM WHERE//SELECT Id FROM WHERE IN//SELECT Id FROM WHERE LIKE//SELECT Id FROM ORDER BY//SELECT ID FROM MYTEST__c//SELECT ID WHERE"}},
+          {option: Option, props: {type: "number", title: "Number of queries stored in the history", key: "numberOfQueriesInHistory", default: 100, inputSize: "1"}},
+          {option: Option, props: {type: "number", title: "Number of saved queries", key: "numberOfQueriesSaved", default: 50, inputSize: "1"}},
+          {option: Option, props: {type: "textarea", title: "Query Templates", key: "queryTemplates", inputSize: "6", placeholder: "SELECT Id FROM// SELECT Id FROM WHERE//SELECT Id FROM WHERE IN//SELECT Id FROM WHERE LIKE//SELECT Id FROM ORDER BY//SELECT ID FROM MYTEST__c//SELECT ID WHERE"}},
           {option: Option, props: {type: "toggle", title: "Enable Query Typo Fix", key: "enableQueryTypoFix", default: false, tooltip: "Enable automation that removes typos from query input"}},
-          {option: Option, props: {type: "text", title: "Prompt Template Name", key: this.sfHost + "_exportAgentForcePrompt", default: Constants.PromptTemplateSOQL, tooltip: "Developer name of the prompt template to use for SOQL query builder"}}
+          {option: Option, props: {type: "text", title: "Prompt Template Name", key: this.sfHost + "_exportAgentForcePrompt", default: Constants.PromptTemplateSOQL, tooltip: "Developer name of the prompt template to use for SOQL query builder"}},
+          //This option is created to disable BOM for CSV in case of errors appearing during export, created in v2.0.0, can be deleted in two releases if no issues are reported
+          {option: Option, props: {type: "toggle", default: true, title: "Use BOM for CSV export", key: "useBomForCsvExport", tooltip: "Add UTF-8 BOM (Byte Order Mark) for Excel compatibility with non-Latin characters."}}
         ]
       },
       {
         id: "data-import",
         tabTitle: "Data Import",
         content: [
-          {option: Option, props: {type: "text", title: "Default batch size", key: "defaultBatchSize", placeholder: "200"}},
-          {option: Option, props: {type: "text", title: "Default thread size", key: "defaultThreadSize", placeholder: "6"}},
+          {option: Option, props: {type: "text", title: "Default batch size", key: "defaultBatchSize", placeholder: "200", inputSize: "1"}},
+          {option: Option, props: {type: "text", title: "Default thread size", key: "defaultThreadSize", placeholder: "6", inputSize: "1"}},
           {option: Option, props: {type: "toggle", title: "Grey Out Skipped Columns in Data Import", key: "greyOutSkippedColumns", tooltip: "Control if skipped columns are greyed out or not in data import"}}
         ]
       },
@@ -295,7 +345,34 @@ class OptionsTabSelector extends React.Component {
           }
         ],
         content: [
+          {option: Option, props: {type: "number", title: "Flow History Size", key: "flowScannerHistorySize", default: 5, tooltip: "Number of old flow versions to keep when purging (in addition to the latest version)."}},
+          {option: MultiCheckboxButtonGroup,
+            props: {title: "Show buttons",
+              key: "hideFlowScannerButtonsOption",
+              checkboxes: [
+                {label: "Agentforce", name: "flow-agentforce", checked: false},
+                {label: "Settings", name: "flow-settings", checked: true}
+              ]}
+          },
+          {option: Option, props: {type: "text", title: "Prompt Template Name", key: this.sfHost + "_flowScannerAgentForcePrompt", default: Constants.PromptTemplateFlow, tooltip: "Developer name of the prompt template to use for Flow Scanner"}},
           {option: FlowScannerRules, props: {model: this.model}}
+        ]
+      },
+      {
+        id: "logs-viewer",
+        tabTitle: "Log Viewer",
+        content: [
+          {option: Option, props: {type: "text", title: "Prompt Template Name", key: this.sfHost + "_debugLogAgentForcePrompt", default: Constants.PromptTemplateDebugLog, tooltip: "Developer name of the prompt template to use for Debug Log Analysis"}},
+          {option: Option, props: {type: "toggle", title: "Fetch log bodies for action details", key: "debugLogFetchBodies", default: true, tooltip: "When enabled, fetches log bodies to derive detailed action information. Disable to reduce API calls and improve performance."}},
+          {option: Option, props: {type: "toggle", title: "Show profile names as suffix in user filter", key: "debugLogShowProfileNames", default: false, tooltip: "When enabled, displays user profile names as a suffix in the format 'Name (ProfileName)' in the user filter picklist and logs table."}},
+          {option: MultiCheckboxButtonGroup,
+            props: {title: "Show buttons",
+              key: "hideDebugLogButtonsOption",
+              checkboxes: [
+                {label: "Share Logs", name: "share-logs", checked: true},
+                {label: "Agentforce", name: "logs-agentforce", checked: false}
+              ]}
+          },
         ]
       },
       {
@@ -303,6 +380,28 @@ class OptionsTabSelector extends React.Component {
         tabTitle: "Custom Shortcuts",
         content: [
           {option: CustomShortcuts, props: {}}
+        ]
+      },
+      {
+        id: "rest-explore",
+        tabTitle: "REST Explorer",
+        content: [
+          {option: MultiCheckboxButtonGroup,
+            props: {title: "Display response information",
+              key: "restExploreDisplayOptions",
+              checkboxes: [
+                {label: "Response Size", name: "responseSize", checked: true},
+                {label: "Response Duration", name: "responseDuration", checked: true}
+              ]}
+          }
+        ]
+      },
+      {
+        id: "show-all",
+        tabTitle: "Show All",
+        content: [
+          {option: Option, props: {type: "toggle", title: "Enable Agentforce Helper for formula fields", key: "showAgentforceHelperInspect", default: true, tooltip: "When enabled, shows the 'Agentforce Helper' link in the field actions menu for calculated/formula fields."}},
+          {option: Option, props: {type: "text", title: "Formula Helper Prompt Template Name", key: this.sfHost + "_formulaAgentForcePrompt", default: "FormulaHelper", tooltip: "Developer name of the prompt template to use for Formula Field Analysis in the Inspect page"}},
         ]
       }
     ];
@@ -332,7 +431,7 @@ class OptionsTabSelector extends React.Component {
 
   handleExportRules() {
     // Export only Flow Scanner related localStorage keys
-    const flowScannerFilters = ["flowScannerRules"];
+    const flowScannerFilters = [FLOW_SCANNER_RULES_STORAGE_KEY];
     // Get reference to App component to call its exportOptions method
     if (this.appRef) {
       this.appRef.exportOptions(flowScannerFilters);
@@ -341,7 +440,7 @@ class OptionsTabSelector extends React.Component {
 
   handleImportRules() {
     if (this.appRef) {
-      this.appRef.pendingImportFilters = ["flowScannerRules"];
+      this.appRef.pendingImportFilters = [FLOW_SCANNER_RULES_STORAGE_KEY];
       this.appRef.refs.fileInput.click();
     }
   }
@@ -360,7 +459,7 @@ class OptionsTabSelector extends React.Component {
 
   render() {
     return h("div", {className: "slds-tabs_default"},
-      h("ul", {className: "options-tab-container slds-tabs_default__nav", role: "tablist"},
+      h("ul", {className: "sfir-options-tab-container slds-tabs_default__nav", role: "tablist"},
         this.tabs.map((tab) => h(OptionsTab, {key: tab.id, title: tab.tabTitle || tab.title, id: tab.id, selectedTabId: this.state.selectedTabId, onTabSelect: this.onTabSelect}))
       ),
       this.tabs.map((tab) => h(OptionsContainer, {
@@ -372,7 +471,8 @@ class OptionsTabSelector extends React.Component {
         actionButtons: tab.actionButtons,
         content: tab.content,
         selectedTabId: this.state.selectedTabId,
-        model: this.model
+        model: this.model,
+        appRef: this.appRef
       }))
     );
   }
@@ -397,6 +497,7 @@ class OptionsContainer extends React.Component {
   constructor(props) {
     super(props);
     this.model = props.model;
+    this.appRef = props.appRef;
   }
 
   getClass() {
@@ -454,7 +555,8 @@ class OptionsContainer extends React.Component {
             key: c.props?.key || `option-${index}`,
             storageKey: c.props?.key,
             ...c.props,
-            model: this.model
+            model: this.model,
+            appRef: this.appRef
           })
         )
       )
@@ -499,17 +601,19 @@ class ArrowButtonOption extends React.Component {
 
   render() {
     return h("div", {className: "slds-grid slds-border_bottom slds-p-horizontal_small slds-p-vertical_x-small"},
-      h("div", {className: "slds-col slds-size_4-of-12 text-align-middle"},
+      h("div", {className: "slds-col slds-size_3-of-12 text-align-middle"},
         h("span", {}, "Popup arrow button orientation and position")
       ),
-      h("div", {className: "slds-col slds-size_8-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"},
-        h("label", {className: "slds-col slds-size_2-of-12 slds-text-align_right"}, "Orientation:"),
-        h("select", {className: "slds-col slds-size_2-of-12 slds-combobox__form-element slds-input combobox-container", defaultValue: this.state.arrowButtonOrientation, name: "arrowPosition", id: "arrowPosition", onChange: this.onChangeArrowOrientation},
-          h("option", {value: "horizontal"}, "Horizontal"),
-          h("option", {value: "vertical"}, "Vertical")
-        ),
+      h("div", {className: "slds-col slds-size_9-of-12 slds-form-element slds-grid slds-grid_align-start slds-grid_vertical-align-center slds-gutters_small"},
+        h("label", {className: "slds-text-align_right slds-m-left_medium slds-m-right_small"}, "Orientation:"),
+        h("div", {className: "slds-form-element__control slds-col slds-size_2-of-12"},
+          h("div", {className: "slds-select_container"},
+            h("select", {className: "slds-select", defaultValue: this.state.arrowButtonOrientation, name: "arrowPosition", id: "arrowPosition", onChange: this.onChangeArrowOrientation},
+              h("option", {value: "horizontal"}, "Horizontal"),
+              h("option", {value: "vertical"}, "Vertical")
+            ))),
         h("label", {className: "slds-m-left_medium slds-col slds-size_2-of-12 slds-text-align_right", htmlFor: "arrowPositionSlider"}, "Position (%):"),
-        h("div", {className: "slds-form-element__control slider-container slds-col slds-size_4-of-12"},
+        h("div", {className: "slds-form-element__control slider-container slds-col slds-size_3-of-12"},
           h("div", {className: "slds-slider"},
             h("input", {type: "range", id: "arrowPositionSlider", className: "slds-slider__range", value: nullToEmptyString(this.state.arrowButtonPosition), min: "0", max: "100", step: "1", onChange: this.onChangeArrowPosition}),
             h("span", {className: "slds-slider__value", "aria-hidden": true}, this.state.arrowButtonPosition)
@@ -555,18 +659,21 @@ class APIVersionOption extends React.Component {
   }
   render() {
     return h("div", {className: "slds-grid slds-border_bottom slds-p-horizontal_small slds-p-vertical_xx-small"},
-      h("div", {className: "slds-col slds-size_4-of-12 text-align-middle"},
+      h("div", {className: "slds-col slds-size_3-of-12 text-align-middle"},
         h("span", {}, "API Version",
           h(Tooltip, {tooltip: "Update api version", idKey: "APIVersion"})
         ),
       ),
-      h("div", {className: "slds-col slds-size_5-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"}),
-      h("div", {className: "slds-col slds-size_3-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"},
-        this.state.apiVersion != defaultApiVersion ? h("div", {className: "slds-form-element__control"},
-          h("button", {className: "slds-button slds-button_brand", onClick: this.onRestoreDefaultApiVersion, title: "Restore Extension's default version"}, "Restore Default")
-        ) : null,
-        h("div", {className: "slds-form-element__control slds-col slds-size_2-of-12"},
-          h("input", {type: "number", required: true, className: "slds-input", value: nullToEmptyString(this.state.apiVersion.split(".0")[0]), onChange: this.onChangeApiVersion}),
+      h("div", {className: "slds-col slds-size_10-of-12 slds-form-element"},
+        h("div", {className: "slds-grid slds-grid_align-start slds-grid_vertical-align-center slds-gutters_small"},
+          h("div", {className: "slds-col slds-size_1-of-12"},
+            h("div", {className: "slds-form-element__control"},
+              h("input", {type: "number", required: true, className: "slds-input", value: nullToEmptyString(this.state.apiVersion.split(".0")[0]), onChange: this.onChangeApiVersion}),
+            )
+          ),
+          this.state.apiVersion != defaultApiVersion ? h("div", {className: "slds-col"},
+            h("button", {className: "slds-button slds-button_brand", onClick: this.onRestoreDefaultApiVersion, title: "Restore Extension's default version"}, "Restore Default")
+          ) : null
         )
       )
     );
@@ -589,7 +696,10 @@ class Option extends React.Component {
     this.tooltip = props.tooltip;
     this.placeholder = props.placeholder;
     this.actionButton = props.actionButton;
+    this.actionButtonVariant = props.actionButtonVariant || "brand"; // Default to "brand" variant (blue button)
     this.inputSize = props.inputSize || "3";
+    this.min = props.min; // Minimum value for number input type (sets HTML min attribute)
+    this.readOnly = props.readOnly || false;
 
     // Enhanced properties
     this.enhancedTitle = props.enhancedTitle;
@@ -693,7 +803,7 @@ class Option extends React.Component {
 
     if (isToggle) {
       return isEnhanced ? null : (
-        h("div", {dir: "rtl", className: "slds-form-element__control slds-col slds-size_1-of-12 slds-p-right_medium"},
+        h("div", {dir: "ltr", className: "slds-form-element__control slds-col slds-size_1-of-12 slds-p-right_medium"},
           h("label", {className: "slds-checkbox_toggle slds-grid"},
             h("input", {type: "checkbox", required: true, id, "aria-describedby": id, className: "slds-input", checked: this.state[this.key || "checked"], onChange: this.onChangeToggle}),
             h("span", {id, className: "slds-checkbox_faux_container center-label"},
@@ -712,17 +822,20 @@ class Option extends React.Component {
       className: isEnhanced ? "slds-input enhanced-option-input" : "slds-input",
       placeholder: this.placeholder,
       value: nullToEmptyString(this.state[this.key]),
-      onChange: this.onChange
+      onChange: this.onChange,
+      readOnly: this.readOnly,
+      ...(this.type === "number" && this.min !== undefined ? {min: this.min} : {})
     })
       : isTextArea ? h("textarea", {
         id,
         className: isEnhanced ? "slds-input enhanced-option-input" : "slds-input",
         placeholder: this.placeholder,
         value: nullToEmptyString(this.state[this.key]),
-        onChange: this.onChange
+        onChange: this.onChange,
+        readOnly: this.readOnly
       })
       : isSelect ? h("select", {
-        className: isEnhanced ? "slds-input enhanced-option-input" : "slds-input slds-m-right_small",
+        className: isEnhanced ? "slds-select enhanced-option-input" : "slds-select slds-m-right_small",
         value: this.state[this.key],
         onChange: this.onChange
       },
@@ -734,11 +847,9 @@ class Option extends React.Component {
     if (isEnhanced) {
       return inputElement;
     } else {
-      // Standard layout wrapping
-      return h("div", {className: "slds-col slds-size_" + this.inputSize + "-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"},
-        h("div", {className: "slds-form-element__control slds-col slds-size_5-of-12"},
-          inputElement
-        )
+      // Standard layout wrapping - returns just the input wrapper
+      return h("div", {className: "slds-form-element__control"},
+        inputElement
       );
     }
   }
@@ -768,6 +879,7 @@ class Option extends React.Component {
   render() {
     const id = this.key;
     const isToggle = this.type == "toggle";
+    const isButton = this.type == "button";
     const isEnhanced = this.enhancedTitle || this.badge || this.severity || this.description;
 
     if (isEnhanced) {
@@ -842,30 +954,39 @@ class Option extends React.Component {
             )
           ),
 
-          // Input controls for non-toggle types
-          !isToggle && this.renderInputControl(id, true)
+          // Input controls for non-toggle and non-button types
+          !isToggle && !isButton && this.renderInputControl(id, true)
         )
       );
     } else {
-      // Standard layout
+      // Standard layout with responsive grid
       return h("div", {className: "slds-grid slds-border_bottom slds-p-horizontal_small slds-p-vertical_xx-small"},
         h("div", {className: "slds-col slds-size_3-of-12 text-align-middle"},
           h("span", {}, this.title,
             h(Tooltip, {tooltip: this.tooltip, idKey: this.key || `option_${this.title || "unnamed"}`})
           )
         ),
-        this.actionButton && h("div", {className: "slds-col slds-size_1-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"},
-          h("div", {className: "slds-form-element__control"},
-            h("button", {
-              className: "slds-button slds-button_brand",
-              onClick: (e) => this.actionButton.onClick(e, this.props.model),
-              title: this.actionButton.title || "Action"
-            }, this.actionButton.label || "Action")
+        h("div", {className: "slds-col slds-size_9-of-12"},
+          h("div", {className: "slds-grid slds-grid_vertical-align-center slds-gutters_small"},
+            // Input field container with configurable size (not for toggle or button types)
+            !isToggle && !isButton && h("div", {className: "slds-col slds-size_" + this.inputSize + "-of-12"},
+              this.renderInputControl(id, false)
+            ),
+            // Action button (if present)
+            // appRef is passed to allow actionButton handlers to show toast notifications via appRef.setState()
+            this.actionButton && h("div", {className: "slds-col"},
+              h("button", {
+                className: `slds-button slds-button_${this.actionButtonVariant}`,
+                onClick: (e) => this.actionButton.onClick(e, this.props.model, this.props.appRef),
+                title: this.actionButton.title || "Action"
+              }, this.actionButton.label || "Action")
+            ),
+            // Toggle control aligned to the right
+            isToggle && h("div", {className: "slds-col slds-grid slds-grid_align-end"},
+              this.renderInputControl(id, false)
+            )
           )
-        ),
-        !isToggle ? this.renderInputControl(id, false)
-        : (h("div", {className: "slds-col slds-size_7-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"}),
-        this.renderInputControl(id, false))
+        )
       );
     }
   }
@@ -887,7 +1008,7 @@ class FaviconOption extends React.Component {
 
     let favicon = localStorage.getItem(this.sfHost + FaviconOption.CUSTOM_FAVICON_KEY) ? localStorage.getItem(this.sfHost + FaviconOption.CUSTOM_FAVICON_KEY) : "";
     let isInternal = favicon.length > 0 && !favicon.startsWith("http");
-    let smartMode = true;
+    let smartMode = localStorage.getItem("faviconSmartMode") !== null ? JSON.parse(localStorage.getItem("faviconSmartMode")) : true;
     this.tooltip = props.tooltip;
     this.state = {
       favicon,
@@ -951,12 +1072,16 @@ class FaviconOption extends React.Component {
   onToogleSmartMode(e) {
     let smartMode = e.target.checked;
     this.setState({smartMode});
+    localStorage.setItem("faviconSmartMode", smartMode);
   }
 
   toggleColorPicker() {
     if (this.state.showColorPicker) {
       this.setState({showColorPicker: false});
     } else {
+      if (!this.state.favicon.startsWith("#")){
+        this.setState({favicon: null});
+      }
       // Calculate position relative to the icon
       const iconElement = this.colorIconRef;
       if (iconElement) {
@@ -1043,7 +1168,7 @@ class FaviconOption extends React.Component {
 
   render() {
     return h("div", {className: "slds-grid slds-border_bottom slds-p-horizontal_small slds-p-vertical_xx-small"},
-      h("div", {className: "slds-col slds-size_4-of-12 text-align-middle"},
+      h("div", {className: "slds-col slds-size_3-of-12 text-align-middle"},
         h("span", {}, "Custom favicon (org specific)",
           h(Tooltip, {tooltip: this.tooltip, idKey: this.key || "favicon_option"})
         )
@@ -1084,8 +1209,8 @@ class FaviconOption extends React.Component {
           ) : null
         )
       ),
-      h("div", {className: "slds-col slds-size_2-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"},
-        h("div", {dir: "rtl", className: "slds-form-element__control slds-col slds-size_6-of-12"},
+      h("div", {className: "slds-col slds-size_2-of-12 slds-form-element slds-grid slds-grid_align-start slds-grid_vertical-align-center slds-gutters_small"},
+        h("div", {dir: "ltr", className: "slds-form-element__control slds-col "},
           h("label", {className: "slds-checkbox_toggle slds-grid"},
             h("input", {type: "checkbox", required: true, className: "slds-input", checked: this.state.smartMode, onChange: this.onToogleSmartMode}),
             h("span", {className: "slds-checkbox_faux_container center-label"},
@@ -1095,7 +1220,7 @@ class FaviconOption extends React.Component {
             )
           )
         ),
-        h("div", {className: "slds-form-element__control slds-col slds-size_6-of-12"},
+        h("div", {className: "slds-form-element__control slds-col"},
           h("button", {className: "slds-button slds-button_brand", onClick: this.populateFaviconColors, title: "Use favicon for all orgs I've visited"}, "Populate All")
         )
       )
@@ -1112,6 +1237,7 @@ class MultiCheckboxButtonGroup extends React.Component {
     this.title = props.title;
     this.key = props.storageKey;
     this.unique = props.unique || false;
+    this.length = props.length || 6;
 
     // Load checkboxes from localStorage or default to props.checkboxes
     const storedCheckboxes = localStorage.getItem(this.key) ? JSON.parse(localStorage.getItem(this.key)) : [];
@@ -1145,11 +1271,10 @@ class MultiCheckboxButtonGroup extends React.Component {
 
   render() {
     return h("div", {className: "slds-grid slds-border_bottom slds-p-horizontal_small slds-p-vertical_xx-small"},
-      h("div", {className: "slds-col slds-size_4-of-12 text-align-middle"},
+      h("div", {className: "slds-col slds-size_3-of-12 text-align-middle"},
         h("span", {}, this.title)
       ),
-      h("div", {className: "slds-col slds-size_2-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"}),
-      h("div", {className: "slds-col slds-size_6-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align-center slds-gutters_small"},
+      h("div", {className: "slds-col slds-size_" + this.length + "-of-12 slds-form-element slds-grid slds-grid_align-start slds-grid_vertical-align-center slds-gutters_small slds-m-left_xxx-small"},
         h("div", {className: "slds-form-element__control"},
           h("div", {className: "slds-checkbox_button-group"},
             this.state.checkboxes.map((checkbox, index) =>
@@ -1167,6 +1292,114 @@ class MultiCheckboxButtonGroup extends React.Component {
   }
 }
 
+class SObjectsCacheOptions extends React.Component {
+
+  constructor(props) {
+    super(props);
+    this.model = props.model;
+    this.appRef = props.appRef;
+    this.onChangeCacheEnabled = this.onChangeCacheEnabled.bind(this);
+    this.onChangeCacheDuration = this.onChangeCacheDuration.bind(this);
+    this.onClearCache = this.onClearCache.bind(this);
+
+    const cacheEnabledKey = Constants.ENABLE_SOBJECTS_LIST_CACHE;
+    const cacheDurationKey = "cacheDuration_" + Constants.CACHE_SOBJECTS_LIST;
+
+    const cacheEnabled = localStorage.getItem(cacheEnabledKey);
+    const cacheDuration = localStorage.getItem(cacheDurationKey);
+
+    this.state = {
+      cacheEnabled: cacheEnabled !== null ? JSON.parse(cacheEnabled) : true,
+      cacheDuration: cacheDuration !== null ? cacheDuration : "8"
+    };
+  }
+
+  onChangeCacheEnabled(e) {
+    const enabled = e.target.checked;
+    this.setState({cacheEnabled: enabled});
+    localStorage.setItem(Constants.ENABLE_SOBJECTS_LIST_CACHE, JSON.stringify(enabled));
+  }
+
+  onChangeCacheDuration(e) {
+    const duration = e.target.value;
+    this.setState({cacheDuration: duration});
+    localStorage.setItem("cacheDuration_" + Constants.CACHE_SOBJECTS_LIST, duration);
+  }
+
+  async onClearCache() {
+    await DataCache.clearCache(Constants.CACHE_SOBJECTS_LIST, this.model.sfHost, true, true);
+    if (this.appRef) {
+      this.appRef.setState({
+        showToast: true,
+        toastMessage: "SObjects List cache cleared successfully.",
+        toastVariant: "success",
+        toastTitle: "Success"
+      });
+      setTimeout(() => this.appRef.hideToast(), 3000);
+    }
+  }
+
+  render() {
+    return h("div", {className: "slds-grid slds-border_bottom slds-p-horizontal_small slds-p-vertical_xx-small"},
+      h("div", {className: "slds-col slds-size_3-of-12 text-align-middle"},
+        h("span", {}, "SObjects List Cache",
+          h(Tooltip, {tooltip: "Enable caching of the SObjects list to improve popup loading performance.", idKey: "sobjectsCacheOption"})
+        )
+      ),
+      h("div", {className: "slds-col slds-size_9-of-12"},
+        h("div", {className: "slds-grid slds-grid_vertical-align-center slds-gutters_small"},
+          h("div", {className: "slds-col slds-size_1-of-2"},
+            h("div", {dir: "ltr", className: "slds-form-element__control"},
+              h("label", {className: "slds-checkbox_toggle slds-grid"},
+                h("input", {
+                  type: "checkbox",
+                  required: true,
+                  id: "enableSobjectsCache",
+                  "aria-describedby": "enableSobjectsCache",
+                  className: "slds-input",
+                  checked: this.state.cacheEnabled,
+                  onChange: this.onChangeCacheEnabled
+                }),
+                h("span", {id: "enableSobjectsCache", className: "slds-checkbox_faux_container center-label"},
+                  h("span", {className: "slds-checkbox_faux"}),
+                  h("span", {className: "slds-checkbox_on"}, "Enabled"),
+                  h("span", {className: "slds-checkbox_off"}, "Disabled")
+                )
+              )
+            )
+          ),
+          h("div", {className: "slds-col slds-size_1-of-2"},
+            h("div", {className: "slds-grid slds-grid_vertical-align-center slds-gutters_small"},
+              h("div", {className: "slds-col slds-size_4-of-12"},
+                h("label", {className: "slds-form-element__label", htmlFor: "sobjectsCacheDuration"}, "Duration (hours):",
+                  h(Tooltip, {tooltip: "If 'Preload SObjects before popup opens' is enabled, recommended value is 8 (to force a refresh every 8 hours), else recommended value is 168 (7 days - refresh when the popup is opened in background)", idKey: "sobjectsCacheDurationTooltip"})),
+              ),
+              h("div", {className: "slds-col slds-size_3-of-12"},
+                h("div", {className: "slds-form-element__control"},
+                  h("input", {
+                    type: "number",
+                    id: "sobjectsCacheDuration",
+                    className: "slds-input",
+                    value: nullToEmptyString(this.state.cacheDuration),
+                    onChange: this.onChangeCacheDuration,
+                    min: 1
+                  })
+                )
+              ),
+              h("div", {className: "slds-col"},
+                h("button", {
+                  className: "slds-button slds-button_brand",
+                  onClick: this.onClearCache,
+                  title: "Clear SObjects List cache"
+                }, "Clear Cache")
+              )
+            )
+          )
+        )
+      )
+    );
+  }
+}
 
 class CSVSeparatorOption extends React.Component {
 
@@ -1184,11 +1417,10 @@ class CSVSeparatorOption extends React.Component {
 
   render() {
     return h("div", {className: "slds-grid slds-border_bottom slds-p-horizontal_small slds-p-vertical_xx-small"},
-      h("div", {className: "slds-col slds-size_4-of-12 text-align-middle"},
+      h("div", {className: "slds-col slds-size_3-of-12 text-align-middle"},
         h("span", {}, "CSV Separator")
       ),
-      h("div", {className: "slds-col slds-size_7-of-12 slds-form-element slds-grid slds-grid_align_center slds-gutters_small"}),
-      h("div", {className: "slds-col slds-size_1-of-12 slds-form-element slds-grid slds-grid_align-end slds-grid_vertical-align_center slds-gutters_small"},
+      h("div", {className: "slds-col slds-size_1-of-12 slds-form-element slds-grid slds-grid_align-start slds-grid_vertical-align_center slds-gutters_small slds-m-left_xxx-small"},
         h("input", {type: "text", id: "csvSeparatorInput", className: "slds-input slds-text-align_right slds-m-right_small", placeholder: "CSV Separator", value: nullToEmptyString(this.state.csvSeparator), onChange: this.onChangeCSVSeparator})
       )
     );
@@ -1256,16 +1488,33 @@ class CustomShortcuts extends React.Component {
     this.onCancelEdit = this.onCancelEdit.bind(this);
     this.onSort = this.onSort.bind(this);
     this.onSearch = this.onSearch.bind(this);
+    this.onToggleGlobal = this.onToggleGlobal.bind(this);
     this.state = {
-      shortcuts: JSON.parse(localStorage.getItem(this.sfHost + "_orgLinks") || "[]"),
+      shortcuts: this.loadShortcuts(),
       editingIndex: -1,
-      newShortcut: {label: "", link: "", section: "", isExternal: false},
+      newShortcut: {label: "", link: "", section: "", isExternal: false, isGlobal: false},
       sortConfig: {
         key: null,
         direction: "asc"
       },
       searchTerm: ""
     };
+  }
+
+  loadShortcuts() {
+    const orgShortcuts = JSON.parse(localStorage.getItem(this.sfHost + "_orgLinks") || "[]")
+      .map((shortcut) => ({...shortcut, isGlobal: false}));
+    const globalShortcuts = JSON.parse(localStorage.getItem(Constants.GLOBAL_LINKS_KEY) || "[]")
+      .map((shortcut) => ({...shortcut, isGlobal: true}));
+    return [...orgShortcuts, ...globalShortcuts];
+  }
+
+  persistShortcuts(shortcuts) {
+    const toStoredShortcut = ({label, link, section, isExternal}) => ({label, link, section, isExternal});
+    const orgShortcuts = shortcuts.filter((shortcut) => !shortcut.isGlobal).map(toStoredShortcut);
+    const globalShortcuts = shortcuts.filter((shortcut) => shortcut.isGlobal).map(toStoredShortcut);
+    localStorage.setItem(this.sfHost + "_orgLinks", JSON.stringify(orgShortcuts));
+    localStorage.setItem(Constants.GLOBAL_LINKS_KEY, JSON.stringify(globalShortcuts));
   }
 
   onSearch(e) {
@@ -1348,7 +1597,7 @@ class CustomShortcuts extends React.Component {
   onAddShortcut() {
     this.setState({
       editingIndex: this.state.shortcuts.length,
-      newShortcut: {label: "", link: "", section: "", isExternal: false}
+      newShortcut: {label: "", link: "", section: "", isExternal: false, isGlobal: false}
     });
   }
 
@@ -1363,7 +1612,7 @@ class CustomShortcuts extends React.Component {
     const newShortcuts = [...this.state.shortcuts];
     newShortcuts.splice(index, 1);
     this.setState({shortcuts: newShortcuts});
-    localStorage.setItem(this.sfHost + "_orgLinks", JSON.stringify(newShortcuts));
+    this.persistShortcuts(newShortcuts);
   }
 
   onSaveShortcut() {
@@ -1382,16 +1631,29 @@ class CustomShortcuts extends React.Component {
     this.setState({
       shortcuts: newShortcuts,
       editingIndex: -1,
-      newShortcut: {label: "", link: "", section: "", isExternal: false}
+      newShortcut: {label: "", link: "", section: "", isExternal: false, isGlobal: false}
     });
 
-    localStorage.setItem(this.sfHost + "_orgLinks", JSON.stringify(newShortcuts));
+    this.persistShortcuts(newShortcuts);
   }
 
   onCancelEdit() {
     this.setState({
       editingIndex: -1,
-      newShortcut: {label: "", link: "", section: ""}
+      newShortcut: {label: "", link: "", section: "", isGlobal: false}
+    });
+  }
+
+  onToggleGlobal(index) {
+    const newShortcuts = [...this.state.shortcuts];
+    newShortcuts[index] = {...newShortcuts[index], isGlobal: !newShortcuts[index].isGlobal};
+    this.setState({shortcuts: newShortcuts});
+    this.persistShortcuts(newShortcuts);
+  }
+
+  onToggleNewShortcutGlobal(checked) {
+    this.setState({
+      newShortcut: {...this.state.newShortcut, isGlobal: checked}
     });
   }
 
@@ -1467,6 +1729,9 @@ class CustomShortcuts extends React.Component {
               h("div", {className: "slds-truncate", title: "External"}, "External")
             ),
             h("th", {scope: "col"},
+              h("div", {className: "slds-truncate", title: "Global"}, "Global")
+            ),
+            h("th", {scope: "col"},
               h("div", {className: "slds-truncate", title: "Actions"}, "Actions")
             )
           )
@@ -1515,6 +1780,22 @@ class CustomShortcuts extends React.Component {
                   )
                 )
               ),
+              h("td", {key: "global", "data-label": "Global"},
+                h("div", {className: "slds-truncate"},
+                  h("label", {className: "slds-checkbox_toggle slds-grid", title: newShortcut.isGlobal ? "Visible in every org" : "Visible only in this org"},
+                    h("input", {
+                      type: "checkbox",
+                      checked: !!newShortcut.isGlobal,
+                      onChange: (e) => this.onToggleNewShortcutGlobal(e.target.checked)
+                    }),
+                    h("span", {className: "slds-checkbox_faux_container center-label"},
+                      h("span", {className: "slds-checkbox_faux"}),
+                      h("span", {className: "slds-checkbox_on"}, "Global"),
+                      h("span", {className: "slds-checkbox_off"}, "Org")
+                    )
+                  )
+                )
+              ),
               h("td", {key: "actions", "data-label": "Actions"},
                 h("div", {className: "slds-truncate"},
                   h("button", {
@@ -1547,6 +1828,22 @@ class CustomShortcuts extends React.Component {
                 h("div", {className: "slds-truncate"},
                   shortcut.isExternal && h("svg", {className: "slds-button__icon"},
                     h("use", {xlinkHref: "symbols.svg#check"})
+                  )
+                )
+              ),
+              h("td", {key: "global", "data-label": "Global"},
+                h("div", {className: "slds-truncate"},
+                  h("label", {className: "slds-checkbox_toggle slds-grid", title: shortcut.isGlobal ? "Visible in every org - toggle to make it specific to this org" : "Visible only in this org - toggle to make it global"},
+                    h("input", {
+                      type: "checkbox",
+                      checked: !!shortcut.isGlobal,
+                      onChange: () => this.onToggleGlobal(index)
+                    }),
+                    h("span", {className: "slds-checkbox_faux_container center-label"},
+                      h("span", {className: "slds-checkbox_faux"}),
+                      h("span", {className: "slds-checkbox_on"}, "Global"),
+                      h("span", {className: "slds-checkbox_off"}, "Org")
+                    )
                   )
                 )
               ),
@@ -1612,11 +1909,11 @@ class FlowScannerRules extends React.Component {
   // Methods for external control by action buttons
   setAllRulesChecked(checked) {
     const updatedRules = this.state.rules.map(rule => ({...rule, checked}));
-    this.setState({
+    this.setState(prevState => ({
       rules: updatedRules,
-      resetCounter: this.state.resetCounter + 1
-    });
-    localStorage.setItem("flowScannerRules", JSON.stringify(updatedRules));
+      resetCounter: prevState.resetCounter + 1
+    }));
+    localStorage.setItem(FLOW_SCANNER_RULES_STORAGE_KEY, JSON.stringify(updatedRules));
   }
 
   checkAllRules() {
@@ -1629,7 +1926,7 @@ class FlowScannerRules extends React.Component {
 
   resetToDefaults() {
     // Remove stored rules to force reload with defaults
-    localStorage.removeItem("flowScannerRules");
+    localStorage.removeItem(FLOW_SCANNER_RULES_STORAGE_KEY);
 
     // Increment reset counter to force component recreation
     this.setState(prevState => ({
@@ -1659,25 +1956,27 @@ class FlowScannerRules extends React.Component {
   }
 
   onRuleChange(ruleName, field, value) {
-    const updatedRules = this.state.rules.map(rule => {
-      if (rule.name === ruleName) {
-        if (field === "checked") {
-          return {...rule, checked: value};
-        } else if (field === "severity") {
-          return {...rule, severity: value};
-        } else if (field === "config") {
-          // Update the main config object for the scanner, and configValue for the UI
-          const newConfig = rule.configType ? {[rule.configType]: value} : {};
-          return {...rule, config: newConfig, configValue: value};
+    this.setState(prevState => {
+      const updatedRules = prevState.rules.map(rule => {
+        if (rule.name === ruleName) {
+          if (field === "checked") {
+            return {...rule, checked: value};
+          } else if (field === "severity") {
+            return {...rule, severity: value};
+          } else if (field === "config") {
+            // Update the main config object for the scanner, and configValue for the UI
+            const newConfig = rule.configType ? {[rule.configType]: value} : {};
+            return {...rule, config: newConfig, configValue: value};
+          }
         }
-      }
-      return rule;
+        return rule;
+      });
+
+      // Save to localStorage
+      localStorage.setItem(FLOW_SCANNER_RULES_STORAGE_KEY, JSON.stringify(updatedRules));
+
+      return {rules: updatedRules};
     });
-
-    this.setState({rules: updatedRules});
-
-    // Save to localStorage
-    localStorage.setItem("flowScannerRules", JSON.stringify(updatedRules));
   }
 
   render() {
@@ -1699,9 +1998,10 @@ class FlowScannerRules extends React.Component {
       );
     }
 
+    const sortedRules = [...rules].sort((a, b) => a.label.localeCompare(b.label));
+
     return h("div", {className: "flow-scanner-rules-container"},
-      rules
-        .sort((a, b) => a.label.localeCompare(b.label))
+      sortedRules
         .map(rule => {
         // Determine badge
           let badge = null;
@@ -1734,7 +2034,7 @@ class FlowScannerRules extends React.Component {
             type: "toggle",
             enhancedTitle: rule.label,
             badge,
-            severity: rule.severity || "info",
+            severity: (rule.severity === "note" ? "info" : rule.severity) || "info",
             description: rule.description,
             // No storageKey - managed by FlowScannerRules component
             key: `flowScannerRule_${rule.name}_${this.state.resetCounter}`,
@@ -1787,7 +2087,7 @@ class App extends React.Component {
           localStorageData[key] = localStorage.getItem(key);
         }
       }
-      filename = "flowScannerRules.json";
+      filename = `${FLOW_SCANNER_RULES_STORAGE_KEY}.json`;
     } else {
       // Export all localStorage
       localStorageData = {...localStorage};
@@ -1826,7 +2126,7 @@ class App extends React.Component {
         const importedData = JSON.parse(event.target.result);
 
         for (const [key, value] of Object.entries(importedData)) {
-          if (filterKeys) {
+          if (filterKeys && Array.isArray(filterKeys)) {
             // Only import keys that match the filter
             if (filterKeys.some(filter => key.startsWith(filter))) {
               localStorage.setItem(key, value);
@@ -1852,7 +2152,7 @@ class App extends React.Component {
 
         this.setState({
           showToast: true,
-          toastMessage: filterKeys ? "Flow Scanner rules imported successfully!" : "Options Imported Successfully!",
+          toastMessage: Array.isArray(filterKeys) ? "Flow Scanner rules imported successfully!" : "Options Imported Successfully!",
           toastVariant: "success",
           toastTitle: "Success"
         });
@@ -1879,37 +2179,49 @@ class App extends React.Component {
   render() {
     const {showToast, toastMessage, toastVariant, toastTitle} = this.state;
     let {model} = this.props;
-    return h("div", {},
-      h("div", {id: "user-info", className: "slds-border_bottom"},
-        h("a", {href: model.sfLink, className: "sf-link"},
-          h("svg", {viewBox: "0 0 24 24"},
-            h("path", {d: "M18.9 12.3h-1.5v6.6c0 .2-.1.3-.3.3h-3c-.2 0-.3-.1-.3-.3v-5.1h-3.6v5.1c0 .2-.1.3-.3.3h-3c-.2 0-.3-.1-.3-.3v-6.6H5.1c-.1 0-.3-.1-.3-.2s0-.2.1-.3l6.9-7c.1-.1.3-.1.4 0l7 7v.3c0 .1-.2.2-.3.2z"})
-          ),
-          " Salesforce Home"
-        ),
-        h("h1", {className: "slds-text-title_bold"}, "Options"),
-        h("span", {}, " / " + model.userInfo),
-        h("div", {className: "flex-right"},
-          h("button", {className: "slds-button slds-button_icon slds-button_icon-border-filled", onClick: () => this.exportOptions(), title: "Export Options"},
-            h("svg", {className: "slds-button__icon"},
-              h("use", {xlinkHref: "symbols.svg#download"})
-            )
-          ),
-          h("button", {className: "slds-button slds-button_icon slds-button_icon-border-filled slds-m-left_x-small", onClick: () => this.refs.fileInput.click(), title: "Import Options"},
-            h("svg", {className: "slds-button__icon"},
-              h("use", {xlinkHref: "symbols.svg#upload"})
-            )
-          ),
-          // Hidden file input for importing options
-          h("input", {
-            type: "file",
-            style: {display: "none"},
-            ref: "fileInput",
-            onChange: this.importOptions,
-            accept: "application/json"
-          })
+
+    // Define utility items for this page (injected as "slots")
+    const utilityItems = [
+      // Export Options button
+      h("div", {className: "slds-builder-header__utilities-item slds-p-top_x-small slds-p-horizontal_x-small sfir-border-none"},
+        h("button", {className: "slds-button slds-button_icon slds-button_icon-border-filled", onClick: () => this.exportOptions(), title: "Export Options"},
+          h("svg", {className: "slds-button__icon"},
+            h("use", {xlinkHref: "symbols.svg#download"})
+          )
         )
       ),
+      // Import Options button
+      h("div", {className: "slds-builder-header__utilities-item slds-p-top_x-small slds-p-horizontal_x-small sfir-border-none"},
+        h("button", {
+          className: "slds-button slds-button_icon slds-button_icon-border-filled",
+          onClick: () => this.refs.fileInput.click(),
+          title: "Import Options"
+        },
+        h("svg", {className: "slds-button__icon"},
+          h("use", {xlinkHref: "symbols.svg#upload"})
+        )
+        ),
+        // Hidden file input for importing options
+        h("input", {
+          type: "file",
+          style: {display: "none"},
+          ref: "fileInput",
+          onChange: this.importOptions,
+          accept: "application/json"
+        })
+      )
+    ];
+
+    return h("div", {},
+      h(PageHeader, {
+        pageTitle: "Options",
+        orgName: model.orgName,
+        sfLink: model.sfLink,
+        sfHost: model.sfHost,
+        spinnerCount: model.spinnerCount,
+        ...model.userInfoModel.getProps(),
+        utilityItems
+      }),
       this.state.showToast
         && h(Toast, {
           variant: this.state.toastVariant,
@@ -1917,8 +2229,10 @@ class App extends React.Component {
           message: this.state.toastMessage,
           onClose: this.hideToast
         }),
-      h("div", {className: "main-container slds-card slds-m-around_small", id: "main-container_header"},
-        h(OptionsTabSelector, {model, appRef: this})
+      h("div", {className: "slds-m-top_xx-large sfir-page-container"},
+        h("div", {className: "slds-card slds-m-around_medium main-container", id: "main-container_header"},
+          h(OptionsTabSelector, {model, appRef: this})
+        )
       )
     );
   }
@@ -1937,10 +2251,5 @@ class App extends React.Component {
       ReactDOM.render(h(App, {model}), root, cb);
     };
     ReactDOM.render(h(App, {model}), root);
-
-    if (parent && parent.isUnitTest) { // for unit tests
-      parent.insextTestLoaded({model});
-    }
-
   });
 }
